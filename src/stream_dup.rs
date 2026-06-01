@@ -32,7 +32,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 pub fn stream_from_vec<T: Clone>(vec: &Vec<T>) -> impl Stream<Item = T> + use<T> {
     let (sender, receiver) = mpsc::unbounded_channel::<T>();
     for n in vec {
-        sender.send(n.clone()).unwrap();
+        sender.send(n.clone()).expect("receiver should never have been dropped/closed");
     }
     UnboundedReceiverStream::new(receiver)
 }
