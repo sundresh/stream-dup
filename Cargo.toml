@@ -2,6 +2,15 @@
 name = "stream-dup"
 version = "0.1.0"
 edition = "2024"
+authors = ["Sameer Sundresh <sameer@sundresh.org>"]
+description = "Duplicate a single Stream into multiple identical Streams"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/sundresh/stream-dup"
+homepage = "https://github.com/sundresh/stream-dup"
+documentation = "https://docs.rs/stream-dup"
+readme = "README.md"
+categories = ["asynchronous", "concurrency", "data-structures"]
+keywords = ["asynchronous", "clone", "duplicate", "shared", "stream"]
 
 [dependencies]
 async-stream = "0.3"
