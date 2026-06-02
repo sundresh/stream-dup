@@ -1,13 +1,14 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 //! Provides the ability to duplicate a single [`Stream`] into an arbitrary number of [`Stream`]s
-//! that yield the same sequence of items as the original stream.
+//! that yield the same sequence of items as the original stream. Defaults to a [`Vec`] as its
+//! backing store, but you can implement alternate [`BackingStore`]s.
 //! 
 //! Example usage:
 //! ```
 //! # use futures_util::StreamExt;
 //! # use tokio::sync::mpsc;
 //! # use tokio_stream::wrappers::UnboundedReceiverStream;
-//! # use stream_dup::{StreamDupExt, stream_from_vec};
+//! # use crate::stream_dup::{StreamDupExt, stream_from_vec};
 //! # #[tokio::main]
 //! # async fn main() {
 //! let vec: Vec<i32> = vec![1, 5, 2, 4, 3];
@@ -26,6 +27,7 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use crate::backing_store::BackingStore;
 
 /// Convenience function to create a [`Stream`] from a [`Vec`] of items. If you want to create a
 /// [`StreamDup`] from a [`Vec`], use [`StreamDup::from`] instead.
@@ -39,40 +41,32 @@ pub fn stream_from_vec<T: Clone>(vec: &Vec<T>) -> impl Stream<Item = T> + use<T>
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 /// Private contents of a [`StreamDup`]
-struct StreamDupContents<Item> {
+struct StreamDupContents<Item, B: BackingStore<Item = Item>> {
     /// Items that have already been loaded from the input stream.
-    loaded_items: Vec<Item>,
+    loaded_items: B,
     /// Source of additional items to be loaded. If it is [`None`], then
     /// [`loaded_items`](Self::loaded_items) contains all of the items already.
     input_stream: Option<Pin<Box<dyn Stream<Item = Item> + Send>>>,
 }
 
-impl<Item: Clone> StreamDupContents<Item> {
-    /// Are all items loaded or could more items be loaded from the input stream later?
-    fn is_complete(&self) -> bool {
-        self.input_stream.is_none()
-    }
-
-    /// Gets the item at the specified `index` if it has already been loaded. If [`None`] is returned
-    /// but [`is_complete`](Self::is_complete) is [`false`], an item may later be available at
-    /// `index`: use [`get`](Self::get) to wait until either it is avaiable or we get to the end
-    /// of the input stream.
-    fn get_loaded(&self, index: usize) -> Option<Item> {
-        self.loaded_items.get(index).map(|item| item.clone())
-    }
-
-    /// Gets the item at the specified `index`, either from the already loaded items or by waiting
-    /// on the input stream. Returns `None` if we get to the end of the input stream before `index`.
-    async fn get(&mut self, index: usize) -> Option<Item> {
-        while self.loaded_items.len() <= index && let Some(input_stream) = self.input_stream.as_mut() {
-            if let Some(item) = input_stream.next().await {
-                self.loaded_items.push(item);
+impl<Item: Clone, B: BackingStore<Item = Item>> StreamDupContents<Item, B> {
+    /// Gets the item at `index` and the index of the next item, either from the already loaded
+    /// items or by waiting on the input stream. Returns `None` if there are no more items.
+    async fn get(&mut self, index: B::Index) -> Option<(Item, B::Index)> {
+        loop {
+            if let Some((item, next_index)) = self.loaded_items.get(index.clone()) {
+                return Some((item.clone(), next_index))
+            } else if let Some(input_stream) = self.input_stream.as_mut() {
+                if let Some(item) = input_stream.next().await {
+                    self.loaded_items.append(item);
+                } else {
+                    self.input_stream = None;
+                    return None;
+                }
             } else {
-                self.input_stream = None;
                 return None;
             }
         }
-        self.get_loaded(index)
     }
 }
 
@@ -86,60 +80,45 @@ impl<Item: Clone> StreamDupContents<Item> {
 /// [`dup`](StreamDupExt::dup) method, which converts the stream to a `StreamDup`. The call
 /// `s.dup()` is shorthand for `StreamDup::new(s)`.
 /// 
-/// Note that all of the items from the input stream are stored in memory in a [`Vec`]. For very
-/// large streams, consider using items that indirectly access data that may either be cached in
-/// memory or stored on disk.
+/// By default, all of the items from the input stream are stored in memory in a [`Vec`]. For very
+/// large streams, consider implementing a different [`BackingStore`] that indirectly accesses data
+/// that may either be cached in memory or stored on disk.
 #[derive(Clone)]
-pub struct StreamDup<Item: Clone + Send + 'static> {
-    contents: Arc<RwLock<StreamDupContents<Item>>>,
+pub struct StreamDup<Item: Clone + Send + 'static, B: BackingStore<Item = Item> = Vec<Item>> {
+    contents: Arc<RwLock<StreamDupContents<Item, B>>>,
 }
 
-impl<Item: Clone + Send + 'static> StreamDup<Item> {
+impl<Item: Clone + Send + 'static, B: BackingStore<Item = Item>> StreamDup<Item, B> {
     /// Create a new `StreamDup` from the items yielded by a [`Stream`].
     pub fn new<S: Stream<Item = Item> + Send + 'static>(stream: S) -> Self {
         let stream_dup = Self {
-            contents: Arc::new(RwLock::new(StreamDupContents { loaded_items: Vec::new(), input_stream: Some(Box::pin(stream)) })),
+            contents: Arc::new(RwLock::new(StreamDupContents { loaded_items: B::default(), input_stream: Some(Box::pin(stream)) })),
         };
         stream_dup
     }
 
-    /// Gets the item at the specified `index` if it has already been loaded. If `(`[`None`]`, `[`true`]`)` is
-    /// returned, an item may later be available at `index`: use [`get`](Self::get) to wait until
-    /// either it is avaiable or we get to the end of the input stream.
-    async fn get_loaded(&self, index: usize) -> (Option<Item>, bool) {
-        let guard = self.contents.read().await;
-        (guard.get_loaded(index), !guard.is_complete())
-    }
-
-    /// Gets the item at the specified `index`, either from the already loaded data or by waiting on the input stream.
-    async fn get(&self, index: usize) -> Option<Item> {
+    /// Gets the item at `index` and the index of the next item, either from the already loaded
+    /// items or by waiting on the input stream. Returns `None` if there are no more items.
+    async fn get(&self, index: B::Index) -> Option<(Item, B::Index)> {
         self.contents.write().await.get(index).await
     }
 
     /// Produces a stream that iterates over the contents of the async vector.
-    pub fn stream(&self) -> impl Stream<Item = Item> + use<'_, Item> {
+    pub fn stream(&self) -> impl Stream<Item = Item> + use<'_, Item, B> {
         stream! {
-            let mut index = 0;
-            loop {
-                let (item_option, more_coming_later) = self.get_loaded(index).await;
-                if let Some(item) = item_option {
-                    index += 1;
-                    yield item;
-                } else if more_coming_later && let Some(item) = self.get(index).await {
-                    index += 1;
-                    yield item;
-                } else {
-                    break;
-                }
+            let mut index = B::Index::default();
+            while let Some((item, next_index)) = self.get(index).await {
+                index = next_index;
+                yield item;
             }
         }
     }
 }
 
-impl<Item: Clone + Send + 'static> From<Vec<Item>> for StreamDup<Item> {
-    /// Creates a complete [`StreamDup`] from a [`Vec`]. The streams returned by
+impl<Item: Clone + Send + 'static, B: BackingStore<Item = Item>> From<B> for StreamDup<Item, B> {
+    /// Creates a complete [`StreamDup`] from a [`BackingStore`]. The streams returned by
     /// [`stream`](Self::stream) will never block.
-    fn from(items: Vec<Item>) -> Self {
+    fn from(items: B) -> Self {
         Self {
             contents: Arc::new(RwLock::new(StreamDupContents { loaded_items: items, input_stream: None })),
         }
@@ -150,6 +129,9 @@ impl<Item: Clone + Send + 'static> From<Vec<Item>> for StreamDup<Item> {
 /// `StreamDupExt` extends types that implement [`Stream`] with the [`dup`](StreamDupExt::dup)
 /// method, which returns a [`StreamDup`] that provides the ability to create multiple streams that
 /// yield the same sequence of items as the original stream.
+///
+/// This uses the default [`Vec`] backing store. To use a different [`BackingStore`], call
+/// [`StreamDup::new`] directly.
 pub trait StreamDupExt<Item: Clone + Send> {
     /// Converts this [`Stream`] to a [`StreamDup`] struct whose [`stream`](StreamDup::stream())
     /// method can be used to create multiple streams of the same items.

@@ -1,6 +1,6 @@
 # stream-dup
 
-Rust library that provides the ability to duplicate a single `Stream` into an arbitrary number of `Stream`s that yield the same sequence of items as the original stream.
+Provides the ability to duplicate a single `Stream` into an arbitrary number of `Stream`s that yield the same sequence of items as the original stream. Defaults to a `Vec` as its backing store, but you can implement alternate `BackingStore`s.
 
 Example usage:
 ```
