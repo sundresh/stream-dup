@@ -54,11 +54,11 @@ impl<Item: Clone, B: BackingStore<Item = Item>> StreamDupContents<Item, B> {
     /// items or by waiting on the input stream. Returns `None` if there are no more items.
     async fn get(&mut self, index: B::Index) -> Option<(Item, B::Index)> {
         loop {
-            if let Some((item, next_index)) = self.loaded_items.get(index.clone()) {
+            if let Some((item, next_index)) = self.loaded_items.get(index.clone()).await {
                 return Some((item.clone(), next_index))
             } else if let Some(input_stream) = self.input_stream.as_mut() {
                 if let Some(item) = input_stream.next().await {
-                    self.loaded_items.append(item);
+                    self.loaded_items.append(item).await;
                 } else {
                     self.input_stream = None;
                     return None;
