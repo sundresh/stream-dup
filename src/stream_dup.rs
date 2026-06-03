@@ -41,30 +41,38 @@ pub fn stream_from_vec<T: Clone>(vec: &Vec<T>) -> impl Stream<Item = T> + use<T>
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 /// Private contents of a [`StreamDup`]
-struct StreamDupContents<Item, B: BackingStore<Item = Item>> {
+struct StreamDupContents<Item, B: BackingStore<E, Item = Item>, E: Clone = ()> {
     /// Items that have already been loaded from the input stream.
     loaded_items: B,
     /// Source of additional items to be loaded. If it is [`None`], then
     /// [`loaded_items`](Self::loaded_items) contains all of the items already.
     input_stream: Option<Pin<Box<dyn Stream<Item = Item> + Send>>>,
+    /// If a stream encounters an error, we store it as `error` and consistently return it as the
+    /// last result after the `loaded_items` in all streams.
+    error: Option<E>,
 }
 
-impl<Item: Clone, B: BackingStore<Item = Item>> StreamDupContents<Item, B> {
+impl<Item: Clone, B: BackingStore<E, Item = Item>, E: Clone> StreamDupContents<Item, B, E> {
     /// Gets the item at `index` and the index of the next item, either from the already loaded
     /// items or by waiting on the input stream. Returns `None` if there are no more items.
-    async fn get(&mut self, index: B::Index) -> Option<(Item, B::Index)> {
+    async fn get(&mut self, index: B::Index) -> Result<Option<(B::Item, B::Index)>, E> {
         loop {
             if let Some((item, next_index)) = self.loaded_items.get(index.clone()).await {
-                return Some((item, next_index))
+                return Ok(Some((item, next_index)))
+            } else if let Some(error) = self.error.as_ref() {
+                return Err(error.clone())
             } else if let Some(input_stream) = self.input_stream.as_mut() {
                 if let Some(item) = input_stream.next().await {
-                    self.loaded_items.append(item).await;
+                    if let Err(error) = self.loaded_items.try_append(item).await {
+                        self.error = Some(error.clone());
+                        return Err(error)
+                    }
                 } else {
                     self.input_stream = None;
-                    return None;
+                    return Ok(None);
                 }
             } else {
-                return None;
+                return Ok(None);
             }
         }
     }
@@ -84,32 +92,53 @@ impl<Item: Clone, B: BackingStore<Item = Item>> StreamDupContents<Item, B> {
 /// large streams, consider implementing a different [`BackingStore`] that indirectly accesses data
 /// that may either be cached in memory or stored on disk.
 #[derive(Clone)]
-pub struct StreamDup<Item: Clone + Send + 'static, B: BackingStore<Item = Item> = Vec<Item>> {
-    contents: Arc<RwLock<StreamDupContents<Item, B>>>,
+pub struct StreamDup<Item: Clone + Send + 'static, B: BackingStore<E, Item = Item> = Vec<Item>, E: Clone = ()> {
+    contents: Arc<RwLock<StreamDupContents<Item, B, E>>>,
 }
 
-impl<Item: Clone + Send + 'static, B: BackingStore<Item = Item>> StreamDup<Item, B> {
+impl<Item: Clone + Send + 'static, B: BackingStore<E, Item = Item>, E: Clone> StreamDup<Item, B, E> {
     /// Create a new `StreamDup` from the items yielded by a [`Stream`].
     pub fn new<S: Stream<Item = Item> + Send + 'static>(stream: S) -> Self {
-        let stream_dup = Self {
-            contents: Arc::new(RwLock::new(StreamDupContents { loaded_items: B::default(), input_stream: Some(Box::pin(stream)) })),
-        };
-        stream_dup
+        Self {
+            contents: Arc::new(RwLock::new(StreamDupContents { loaded_items: B::default(), input_stream: Some(Box::pin(stream)), error: None })),
+        }
     }
 
     /// Gets the item at `index` and the index of the next item, either from the already loaded
     /// items or by waiting on the input stream. Returns `None` if there are no more items.
-    async fn get(&self, index: B::Index) -> Option<(Item, B::Index)> {
+    async fn get(&self, index: B::Index) -> Result<Option<(B::Item, B::Index)>, E> {
         self.contents.write().await.get(index).await
     }
 
-    /// Produces a stream that iterates over the contents of the async vector.
-    pub fn stream(&self) -> impl Stream<Item = Item> + use<'_, Item, B> {
+    /// Produces a stream that iterates over the contents of the async vector. If something goes
+    /// wrong along the way, the stream terminates without yielding an error.
+    pub fn stream(&self) -> impl Stream<Item = B::Item> + use<'_, Item, B, E> {
         stream! {
             let mut index = B::Index::default();
-            while let Some((item, next_index)) = self.get(index).await {
+            while let Some((item, next_index)) = self.get(index).await.unwrap_or(None) {
                 index = next_index;
                 yield item;
+            }
+        }
+    }
+
+    /// Produces a `Result` stream that iterates over the contents of the async vector. If something
+    /// goes wrong along the way, the stream yields an error and then terminates.
+    pub fn result_stream(&self) -> impl Stream<Item = Result<B::Item, E>> + use<'_, Item, B, E> {
+        stream! {
+            let mut index = B::Index::default();
+            loop {
+                match self.get(index).await {
+                    Ok(Some((item, next_index))) => {
+                        index = next_index;
+                        yield Ok(item);
+                    },
+                    Ok(None) => break,
+                    Err(error) => {
+                        yield Err(error);
+                        break;
+                    }
+                }
             }
         }
     }
@@ -120,7 +149,7 @@ impl<Item: Clone + Send + 'static, B: BackingStore<Item = Item>> From<B> for Str
     /// [`stream`](Self::stream) will never block.
     fn from(items: B) -> Self {
         Self {
-            contents: Arc::new(RwLock::new(StreamDupContents { loaded_items: items, input_stream: None })),
+            contents: Arc::new(RwLock::new(StreamDupContents { loaded_items: items, input_stream: None, error: None })),
         }
     }
 }

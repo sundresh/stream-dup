@@ -1,5 +1,8 @@
+use std::marker::PhantomData;
+
 #[allow(unused_imports)]
 use futures_core::Stream;
+use futures_util::FutureExt;
 #[allow(unused_imports)]
 use crate::stream_dup::StreamDup;
 
@@ -10,7 +13,10 @@ use crate::stream_dup::StreamDup;
 /// are returned as-is by [`BackingStore::get`]. Other implementations of [`BackingStore`] may
 /// choose to coalesce or split items. For example, a file-based backing store may be designed to
 /// return as many bytes that remain in a file, up to some maximum block size.
-pub trait BackingStore: Default {
+///
+/// `Error` is an optional type parameter rather than an associated type, since default associated
+/// types are currently unstable in Rust.
+pub trait BackingStore<Error: Clone = ()>: Default {
     type Index: Clone + Default;
     type Item: Clone;
 
@@ -19,7 +25,16 @@ pub trait BackingStore: Default {
     fn get(&self, index: Self::Index) -> impl Future<Output = Option<(Self::Item, Self::Index)>>;
 
     /// Appends `item` to the backing store, so it can later be returned by [`get`](Self::get).
-    fn append(&mut self, item: Self::Item) -> impl Future<Output = ()>;
+    /// If you may need to return an `Error`, implement [`try_append`](Self::try_append) instead.
+    fn append(&mut self, item: Self::Item) -> impl Future<Output = ()> {
+        self.try_append(item).map(|_| ())
+    }
+
+    /// Appends `item` to the backing store, so it can later be returned by [`get`](Self::get).
+    /// If you do not need to return an `Error`, implement [`append`](Self::append) instead.
+    fn try_append(&mut self, item: Self::Item) -> impl Future<Output = Result<(), Error>> {
+        self.append(item).map(|_| Ok(()))
+    }
 }
 
 impl<Item: Clone> BackingStore for Vec<Item> {
