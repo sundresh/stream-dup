@@ -12,22 +12,22 @@ use crate::stream_dup::StreamDup;
 /// return as many bytes that remain in a file, up to some maximum block size.
 pub trait BackingStore: Default {
     type Index: Clone + Default;
-    type Item;
+    type Item: Clone;
 
     /// Gets the item at `index` and the index of the next item, or returns [`None`] if there
     /// currently is no item at the specified index.
-    fn get(&self, index: Self::Index) -> impl Future<Output = Option<(&Self::Item, Self::Index)>>;
+    fn get(&self, index: Self::Index) -> impl Future<Output = Option<(Self::Item, Self::Index)>>;
 
     /// Appends `item` to the backing store, so it can later be returned by [`get`](Self::get).
     fn append(&mut self, item: Self::Item) -> impl Future<Output = ()>;
 }
 
-impl<Item> BackingStore for Vec<Item> {
+impl<Item: Clone> BackingStore for Vec<Item> {
     type Index = usize;
     type Item = Item;
 
-    fn get(&self, index: Self::Index) -> impl Future<Output = Option<(&Item, Self::Index)>> {
-        std::future::ready(self.as_slice().get(index).map(|item| (item, index + 1)))
+    fn get(&self, index: Self::Index) -> impl Future<Output = Option<(Self::Item, Self::Index)>> {
+        std::future::ready(self.as_slice().get(index).map(|item| (item.clone(), index + 1)))
     }
 
     fn append(&mut self, item: Item) -> impl Future<Output = ()> {
