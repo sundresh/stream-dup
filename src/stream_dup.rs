@@ -8,7 +8,7 @@
 //! # use futures_util::StreamExt;
 //! # use tokio::sync::mpsc;
 //! # use tokio_stream::wrappers::UnboundedReceiverStream;
-//! # use crate::stream_dup::{StreamDupExt, stream_from_vec};
+//! # use stream_dup::{StreamDupExt, stream_from_vec};
 //! # #[tokio::main]
 //! # async fn main() {
 //! let vec: Vec<i32> = vec![1, 5, 2, 4, 3];

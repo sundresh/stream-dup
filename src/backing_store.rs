@@ -16,6 +16,67 @@ use crate::stream_dup::StreamDup;
 ///
 /// `Error` is an optional type parameter rather than an associated type, since default associated
 /// types are currently unstable in Rust.
+///
+/// Example of an infallible [`BackingStore`]:
+/// ```
+/// # use stream_dup::BackingStore;
+/// struct InfallibleBackingStore<T> {
+///     contents: Vec<T>
+/// }
+///
+/// impl<T> Default for InfallibleBackingStore<T> {
+///     fn default() -> Self {
+///         Self { contents: Default::default() }
+///     }
+/// }
+///
+/// impl<Item: Clone> BackingStore for InfallibleBackingStore<Item> {
+///     type Index = usize;
+///     type Item = Item;
+///
+///     fn get(&self, index: Self::Index) -> impl Future<Output = Option<(Self::Item, Self::Index)>> {
+///         std::future::ready(self.contents.as_slice().get(index)
+///             .map(|item| (item.clone(), index + 1)))
+///     }
+///
+///     fn append(&mut self, item: Item) -> impl Future<Output = ()> {
+///         self.contents.push(item);
+///         std::future::ready(())
+///     }
+/// }
+/// ```
+///
+/// Example of a fallible [`BackingStore`]:
+/// ```
+/// # use stream_dup::BackingStore;
+/// #[derive(Clone)]
+/// struct MyError { }
+///
+/// struct FallibleBackingStore<T> {
+///     contents: Vec<T>
+/// }
+///
+/// impl<T> Default for FallibleBackingStore<T> {
+///     fn default() -> Self {
+///         Self { contents: Default::default() }
+///     }
+/// }
+///
+/// impl<Item: Clone> BackingStore<MyError> for FallibleBackingStore<Item> {
+///     type Index = usize;
+///     type Item = Item;
+///
+///     fn get(&self, index: Self::Index) -> impl Future<Output = Option<(Self::Item, Self::Index)>> {
+///         std::future::ready(self.contents.as_slice().get(index)
+///             .map(|item| (item.clone(), index + 1)))
+///     }
+///
+///     fn try_append(&mut self, item: Item) -> impl Future<Output = Result<(), MyError>> {
+///         self.contents.push(item);
+///         std::future::ready(Ok(()))  // Could also be `Err(MyError { })`
+///     }
+/// }
+/// ```
 pub trait BackingStore<Error: Clone = ()>: Default {
     type Index: Clone + Default;
     type Item: Clone;
@@ -31,7 +92,8 @@ pub trait BackingStore<Error: Clone = ()>: Default {
     }
 
     /// Appends `item` to the backing store, so it can later be returned by [`get`](Self::get).
-    /// If you do not need to return an `Error`, implement [`append`](Self::append) instead.
+    /// Returns an error if appending fails. If you do not need to return an `Error`, implement
+    /// [`append`](Self::append) instead.
     fn try_append(&mut self, item: Self::Item) -> impl Future<Output = Result<(), Error>> {
         self.append(item).map(|_| Ok(()))
     }
